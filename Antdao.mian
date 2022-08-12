@@ -1,0 +1,679 @@
+"name": "@cyberlab/Antdao",
+  "version": "4.1.4",
+  "version": "4.1.6",
+  "description": "The JavaScript library that allows user to control their decentralized identity(DIDs) and social graph data.",
+  "main": "lib/index.js",
+  "bin": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "scripts": {
+    "build": "tsc -p ."
+@@ -34,10 +35,12 @@
+    "@stablelib/sha256": "^1.0.1",
+    "3id-did-provider": "^1.1.1",
+    "bs58": "^4.0.1",
+    "idb": "^7.0.0",
+    "key-did-resolver": "^1.4.0"
+  },
+  "devDependencies": {
+    "@types/bs58": "^4.0.1",
+    "prettier": "^2.5.1",
+    "typescript": "^4.4.4"
+  }
+}
+ 108  
+src/crypto.ts
+@@ -0,0 +1,108 @@
+import { openDB } from 'idb';
+
+let dbPromise: any = null;
+
+if (typeof window !== 'undefined' && typeof window.indexedDB !== 'undefined') {
+  dbPromise = openDB('Antdao', 1, {
+    upgrade(db) {
+      db.createObjectStore('store');
+    },
+  });
+}
+
+export async function get(key: string) {
+  if(dbPromise) {
+    return (await dbPromise).get('store', key);
+  }
+
+  return;
+}
+
+export async function set(key: string, val: CryptoKeyPair) {
+  if(dbPromise) {
+    return (await dbPromise).put('store', val, key);
+  }
+
+  return;
+}
+
+export async function clear() {
+  return (await dbPromise).clear('store');
+}
+
+export async function rotateSigningKey() {
+  await clear();
+  return generateSigningKey();
+}
+
+export async function generateSigningKey() {
+  const algorithm = {
+    name: 'ECDSA',
+    namedCurve: 'P-256',
+  };
+  const extractable = false;
+  const keyUsages: KeyUsage[] = ['sign', 'verify'];
+
+  const signingKey = await window.crypto.subtle.generateKey(
+    algorithm,
+    extractable,
+    keyUsages,
+  );
+
+  set('signingKey', signingKey).then();
+
+  return signingKey;
+}
+
+export async function getSigningKey() {
+  let signingKey = await get('signingKey');
+
+  if (!signingKey) {
+    signingKey = generateSigningKey();
+  }
+
+  return signingKey;
+}
+
+export async function getPublicKey() {
+  const signingKey = await getSigningKey();
+  const exported = await window.crypto.subtle.exportKey(
+    'spki',
+    signingKey.publicKey,
+  );
+
+  return window.btoa(arrayBuffer2String(exported));
+}
+
+export async function signWithSigningKey(input: string) {
+  const signingKey = await getSigningKey();
+  const algorithm = {
+    name: 'ECDSA',
+    hash: {
+      name: 'SHA-256',
+    },
+  };
+  const enc = new TextEncoder();
+  const encodedMessage = enc.encode(input);
+
+  const signature = await window.crypto.subtle.sign(
+    algorithm,
+    signingKey.privateKey,
+    encodedMessage,
+  );
+
+  return arrayBuffer2Hex(signature);
+}
+
+export function arrayBuffer2Hex(buffer: ArrayBuffer) {
+  return (
+    '0x' +
+    Array.prototype.map
+      .call(new Uint8Array(buffer), (x) => ('00' + x.toString(16)).slice(-2))
+      .join('')
+  );
+}
+
+function arrayBuffer2String(buffer: ArrayBuffer) {
+  return String.fromCharCode.apply(null, new Uint8Array(buffer) as any);
+}
+  223  
+src/Antdao.ts
+@@ -9,14 +9,23 @@ import { fromString } from 'uint8arrays';
+import { DID } from 'dids';
+import { IDX } from '@ceramicstudio/idx';
+import { endpoints } from './network';
+import { follow, unfollow, setAlias } from './queries';
+import { follow, registerSigningKey, setAlias, unfollow } from './queries';
+import { ConnectError, ErrorCode } from './error';
+import { Endpoint, Blockchain, AntdaoStore, Config } from './types';
+import {
+  Blockchain,
+  Config,
+  AntdaoStore,
+  Endpoint,
+  Operation,
+} from './types';
+import { getAddressByProvider } from './utils';
+import { Caip10Link } from '@ceramicnetwork/stream-caip10-link';
+import { Env } from '.';
+import { cAuth } from './cAuth';
+import { DFLAG, C_ACCESS_TOKEN_KEY } from './constant';
+import { C_ACCESS_TOKEN_KEY, DFLAG } from './constant';
+import { getPublicKey, signWithSigningKey } from './crypto';
+import bs58 from 'bs58';
+
+class Antdao {
+  address: string = '';
+  namespace: string;
+@@ -37,6 +46,7 @@ class Antdao {
+
+  constructor(config: Config) {
+    const { provider, namespace, env, chainRef, chain } = config;
+
+    if (!namespace) {
+      throw new ConnectError(ErrorCode.EmptyNamespace);
+    }
+@@ -276,6 +286,9 @@ class Antdao {
+        throw new ConnectError(ErrorCode.AuthProviderError, e as string);
+      }
+    }
+
+    this.authWithSigningKey();
+    return;
+    try {
+      if (!DFLAG) {
+        console.log(this.provider);
+@@ -384,22 +397,51 @@ class Antdao {
+  }
+
+  async connect(targetAddr: string, alias: string = '') {
+    await this.authenticate();
+    if (!this.address) {
+      if (this.chain === Blockchain.ETH) {
+        this.address = await this.provider.getSigner().getAddress();
+      } else if (this.chain === Blockchain.SOLANA) {
+        this.address = this.provider.publicKey.toString();
+      }
+    }
+
+    const operation: Operation = {
+      name: 'follow',
+      from: this.address,
+      to: targetAddr,
+      namespace: this.namespace,
+      network: this.chain,
+      alias,
+      timestamp: Date.now(),
+    };
+
+    const signature = await signWithSigningKey(JSON.stringify(operation));
+    const publicKey = await getPublicKey();
+
+    const params = {
+      fromAddr: this.address,
+      toAddr: targetAddr,
+      alias,
+      namespace: this.namespace,
+      url: this.endpoint.AntdaoApi,
+      signature,
+      signingKey: publicKey,
+      operation: JSON.stringify(operation),
+      network: this.chain,
+    };
+
+
+    try {
+      const sign = await this.signWithJwt();
+      // const sign = await this.signWithJwt();
+
+      const resp = await follow({
+        fromAddr: this.address,
+        toAddr: targetAddr,
+        alias,
+        namespace: this.namespace,
+        url: this.endpoint.AntdaoApi,
+        signature: sign!,
+        network: this.chain,
+      });
+      const resp = await follow(params);
+
+      if (resp?.data?.follow.result !== 'SUCCESS') {
+      if (resp.data.connect.result === 'INVALID_SIGNATURE') {
+        await this.authWithSigningKey();
+        return;
+      }
+
+      if (resp?.data?.connect.result !== 'SUCCESS') {
+        throw new ConnectError(
+          ErrorCode.GraphqlError,
+          resp?.data?.follow.result,
+@@ -415,29 +457,58 @@ class Antdao {
+    }
+  }
+
+  async disconnect(targetAddr: string) {
+    await this.authenticate();
+  async disconnect(targetAddr: string, alias: string = '') {
+    if (!this.address) {
+      if (this.chain === Blockchain.ETH) {
+        this.address = await this.provider.getSigner().getAddress();
+      } else if (this.chain === Blockchain.SOLANA) {
+        this.address = this.provider.publicKey.toString();
+      }
+    }
+
+    const operation: Operation = {
+      name: 'unfollow',
+      from: this.address,
+      to: targetAddr,
+      namespace: this.namespace,
+      network: this.chain,
+      alias,
+      timestamp: Date.now(),
+    };
+
+    const signature = await signWithSigningKey(JSON.stringify(operation));
+    const publicKey = await getPublicKey();
+
+    const params = {
+      fromAddr: this.address,
+      toAddr: targetAddr,
+      alias,
+      namespace: this.namespace,
+      url: this.endpoint.AntdaoApi,
+      signature,
+      signingKey: publicKey,
+      operation: JSON.stringify(operation),
+      network: this.chain,
+    };
+
+
+    try {
+      const sign = await this.signWithJwt();
+      // const sign = await this.signWithJwt();
+
+      const resp = await unfollow({
+        fromAddr: this.address,
+        toAddr: targetAddr,
+        url: this.endpoint.AntdaoApi,
+        namespace: this.namespace,
+        signature: sign,
+        network: this.chain,
+      });
+      const resp = await unfollow(params);
+
+      if (resp.data.disconnect.result === 'INVALID_SIGNATURE') {
+        await this.authWithSigningKey();
+        return;
+      }
+
+      if (resp?.data?.unfollow.result !== 'SUCCESS') {
+      if (resp?.data?.disconnect.result !== 'SUCCESS') {
+        throw new ConnectError(
+          ErrorCode.GraphqlError,
+          resp?.data?.unfollow.result,
+            ErrorCode.GraphqlError,
+            resp?.data?.follow.result,
+        );
+      }
+
+      console.log('Disconnect success');
+    } catch (e: any) {
+      throw new ConnectError(ErrorCode.GraphqlError, e.message || e);
+    }
+@@ -446,37 +517,97 @@ class Antdao {
+    }
+  }
+
+  async setAlias(targetAddr: string, alias: string) {
+    await this.authenticate();
+  async setAlias(targetAddr: string, alias: string = '') {
+    if (!this.address) {
+      if (this.chain === Blockchain.ETH) {
+        this.address = await this.provider.getSigner().getAddress();
+      } else if (this.chain === Blockchain.SOLANA) {
+        this.address = this.provider.publicKey.toString();
+      }
+    }
+
+    const operation: Operation = {
+      name: 'follow',
+      from: this.address,
+      to: targetAddr,
+      namespace: this.namespace,
+      network: this.chain,
+      alias,
+      timestamp: Date.now(),
+    };
+
+    const signature = await signWithSigningKey(JSON.stringify(operation));
+    const publicKey = await getPublicKey();
+
+    const params = {
+      fromAddr: this.address,
+      toAddr: targetAddr,
+      alias,
+      namespace: this.namespace,
+      url: this.endpoint.AntdaoApi,
+      signature,
+      signingKey: publicKey,
+      operation: JSON.stringify(operation),
+      network: this.chain,
+    };
+
+
+    try {
+      const sign = await this.signWithJwt();
+      // const sign = await this.signWithJwt();
+
+      const resp = await setAlias({
+        fromAddr: this.address,
+        toAddr: targetAddr,
+        url: this.endpoint.AntdaoApi,
+        namespace: this.namespace,
+        signature: sign,
+        alias,
+        network: this.chain,
+      });
+      const resp = await setAlias(params);
+
+      if (resp.data.alias.result === 'INVALID_SIGNATURE') {
+        await this.authWithSigningKey();
+        return;
+      }
+
+      if (resp?.data?.setAlias.result !== 'SUCCESS') {
+      if (resp?.data?.alias.result !== 'SUCCESS') {
+        throw new ConnectError(
+          ErrorCode.GraphqlError,
+          resp?.data?.setAlias.result,
+            ErrorCode.GraphqlError,
+            resp?.data?.follow.result,
+        );
+      }
+
+      console.log('Set alias success');
+    } catch (e: any) {
+      throw new ConnectError(ErrorCode.GraphqlError, e.message || e);
+    }
+    if (DFLAG) {
+      this.ceramicSetAlias(targetAddr, alias);
+    }
+  }
+
+  async authWithSigningKey() {
+    const acknowledgement =
+
+      'I authorize Antdao from this device using signing key:\n';
+    const publicKey = await getPublicKey();
+
+    const message = `${acknowledgement}${publicKey}`;
+    let signer = undefined;
+    let signingKeySignature = undefined;
+
+    if (this.chain === Blockchain.ETH) {
+      signer = this.provider.getSigner();
+      this.address = await signer.getAddress();
+      signingKeySignature = await signer.signMessage(message);
+    } else if (this.chain === Blockchain.SOLANA) {
+      this.address = this.provider.publicKey.toString();
+      signingKeySignature = bs58.encode(
+        await this.provider.signMessage(new TextEncoder().encode(message)),
+      );
+    }
+
+    if (signingKeySignature) {
+      const result = await registerSigningKey({
+        address: this.address,
+        signature: signingKeySignature,
+        message,
+        network: this.chain,
+        url: this.endpoint.AntdaoApi,
+      });
+    }
+  }
+}
+
+export default Antdao;
+  144  
+src/queries.ts
+@@ -1,49 +1,61 @@
+import { Blockchain } from './types';
+export type Query = 'connect' | 'disconnect';
+
+export const connectQuerySchema = ({
+  fromAddr,
+  toAddr,
+  alias,
+  namespace,
+  signature,
+  network,
+}: {
+type RegisterSigningKeyInput = {
+  address: string;
+  message: string;
+  signature: string;
+  network: string;
+};
+
+type UpdateConnectionInput = {
+  fromAddr: string;
+  toAddr: string;
+  alias: string;
+  namespace: string;
+  signature: string;
+  network: Blockchain;
+}) => {
+  operation: string;
+  signingKey: string;
+  alias: string;
+  network: string;
+};
+
+export const registerSigningKeySchema = (input: RegisterSigningKeyInput) => {
+  return {
+    operationName: 'follow',
+    query: `mutation follow {\n  follow(fromAddr: \"${fromAddr}\", toAddr: \"${toAddr}\", alias: \"${alias}\", namespace: \"${namespace}\", signature: \"${signature}\", network: \"${network}\") {\n    result\n  }\n}\n`,
+    variables: {},
+    operationName: 'registerKey',
+    query: `mutation registerKey($input: RegisterKeyInput!) {
+      registerKey(input: $input) {
+        result
+      }
+    }`,
+    variables: { input },
+  };
+};
+export const connectQuerySchema = (input: UpdateConnectionInput) => {
+  return {
+    operationName: 'connect',
+    query: `mutation connect($input: UpdateConnectionInput!) {connect(input: $input) {result}}`,
+    variables: {
+      input,
+    },
+  };
+};
+
+export const disconnectQuerySchema = ({
+  fromAddr,
+  toAddr,
+  namespace,
+  signature,
+  network,
+}: {
+  fromAddr: string;
+  toAddr: string;
+  namespace: string;
+  signature: String;
+  network: Blockchain;
+}) => {
+export const disconnectQuerySchema = (input: UpdateConnectionInput) => {
+  return {
+    operationName: 'disconnect',
+    query: `mutation disconnect($input: UpdateConnectionInput!) {disconnect(input: $input) {result}}`,
+    variables: {
+      input,
+    },
+  };
+};
+export const setAliasQuerySchema = (input: UpdateConnectionInput) => {
+  return {
+    operationName: 'unfollow',
+    query: `mutation unfollow {
+        unfollow(fromAddr: \"${fromAddr}\", toAddr: \"${toAddr}\", namespace: \"${namespace}\", signature: \"${signature}\", network: \"${network}\") {
+              result
+              }
+            }`,
+    variables: {},
+    operationName: 'alias',
+    query: `mutation alias($input: UpdateConnectionInput!) {alias(input: $input) {result}}`,
+    variables: {
+      input,
+    },
+  };
+};
+
+@@ -68,37 +80,12 @@ export const authSchema = ({
+  };
+};
+
+export const setAliasQuerySchema = ({
+  fromAddr,
+  toAddr,
+  namespace,
+  signature,
+  alias,
+  network = Blockchain.ETH,
+}: {
+  fromAddr: string;
+  toAddr: string;
+  namespace: string;
+  signature: string;
+  alias: string;
+  network: Blockchain;
+}) => {
+  return {
+    operationName: 'setAlias',
+    query: `mutation setAlias {
+        setAlias(fromAddr: \"${fromAddr}\", toAddr: \"${toAddr}\", alias: \"${alias}\", namespace: \"${namespace}\", signature: \"${signature}\", network: \"${network}\") {
+              result
+              }
+            }`,
+    variables: {},
+  };
+};
+
+export const querySchemas = {
+  connect: connectQuerySchema,
+  disconnect: disconnectQuerySchema,
+  auth: authSchema,
+  setAlias: setAliasQuerySchema,
+  registerSigningKey: registerSigningKeySchema,
+};
+
+export const request = async (url = '', data = {}) => {
+@@ -128,6 +115,22 @@ export const handleQuery = (
+  return request(url, data);
+};
+
+export const registerSigningKey = ({
+  address,
+  message,
+  signature,
+  network = Blockchain.ETH,
+  url,
+}: RegisterSigningKeyInput & { url: string }) => {
+  const result = querySchemas['registerSigningKey']({
+    address,
+    message,
+    signature,
+    network,
+  });
+  return handleQuery(result, url);
+};
+
+export const auth = ({
+  address,
+  signature,
+@@ -154,6 +157,8 @@ export const follow = ({
+  namespace,
+  url,
+  signature,
+  operation,
+  signingKey,
+  network = Blockchain.ETH,
+}: {
+  fromAddr: string;
+@@ -162,6 +167,8 @@ export const follow = ({
+  namespace: string;
+  signature: string;
+  url: string;
+  operation: string;
+  signingKey: string;
+  network: Blockchain;
+}) => {
+  const schema = querySchemas['connect']({
+@@ -170,6 +177,8 @@ export const follow = ({
+    alias,
+    namespace,
+    signature,
+    operation,
+    signingKey,
+    network,
+  });
+  return handleQuery(schema, url);
+@@ -178,23 +187,32 @@ export const follow = ({
+export const unfollow = ({
+  fromAddr,
+  toAddr,
+  alias,
+  namespace,
+  url,
+  signature,
+  operation,
+  signingKey,
+  network = Blockchain.ETH,
+}: {
+  fromAddr: string;
+  toAddr: string;
+  alias: string;
+  namespace: string;
+  signature: string;
+  url: string;
+  operation: string;
+  signingKey: string;
+  network: Blockchain;
+}) => {
+  const schema = querySchemas['disconnect']({
+    fromAddr,
+    toAddr,
+    alias,
+    namespace,
+    signature,
+    operation,
+    signingKey,
+    network,
+  });
+  return handleQuery(schema, url);
+@@ -207,6 +225,8 @@ export const setAlias = ({
+  namespace,
+  url,
+  signature,
+  operation,
+  signingKey,
+  network = Blockchain.ETH,
+}: {
+  fromAddr: string;
+@@ -215,6 +235,8 @@ export const setAlias = ({
+  namespace: string;
+  signature: string;
+  url: string;
+  operation: string;
+  signingKey: string;
+  network: Blockchain;
+}) => {
+  const schema = querySchemas['setAlias']({
+@@ -223,6 +245,8 @@ export const setAlias = ({
+    alias,
+    namespace,
+    signature,
+    operation,
+    signingKey,
+    network,
+  });
+  return handleQuery(schema, url);
