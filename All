@@ -1,0 +1,522 @@
+### BidirectionalConnect
+
+```jsx
+Antdao.bidirectionalConnect(targetAddr, biConnectionType);
+```
+
+- `targetAddr` - The target wallet address to disconnect.
+- `biConnectionType` - The type of the bidirectional connection. See [BiConnection Type](#biconnection-type) for more details.
+
+Learn more about bidirectional Connection [here](https://docs.Antdao.me/concepts/bidirectional-connection/)
+
+### AckNotifications
+
+```jsx
+Antdao.ackNotifications(notificationIds);
+```
+
+- `notificationIds` - A list of notificationId .
+
+Learn more about notification [here](https://docs.Antdao.me/concepts/notification/).
+
+### AckAllNotifications
+
+```jsx
+Antdao.ackAllNotifications();
+```
+
+Learn more about notification [here](https://docs.Antdao.me/concepts/notification/).
+
+### Connection Type
+
+You can create different types of connections for different purposes.
+@@ -110,6 +139,18 @@ Those types we support: `FOLLOW`, `LIKE`, `REPORT`, `WATCH` and `VOTE`
+
+<b>Note</b>: Only one type connection can be created from one to another, which means you can't create both "FOLLOW" connection and "LIKE" connection from you to "Ryan".
+
+### BiConnection Type
+
+You can create different types of bi-connections for different purposes (e.g. you can send a request by using `INIT` type or accept a request by using `ACCEPT` type).
+
+```jsx
+import { BiConnectionType } from '@cyberlab/Antdao';
+Antdao.bidirectionalConnect(targetAddr, BiConnectionType.INIT);
+```
+
+The types we support: `INIT`, `ACCEPT`, `REJECT`, `TERMINATE`, `BLOCK` and `UNBLOCK`.
+
+### Solana
+
+You can get Solana provider from [@solana/wallet-adapter-react]('https://github.com/solana-labs/wallet-adapter)
+ BIN +27.2 KB 
+cyberlab-Antdao-4.4.7.tgz
+Binary file not shown.
+  173  
+src/Antdao.ts
+@@ -5,6 +5,9 @@ import {
+  registerSigningKey,
+  setAlias,
+  unfollow,
+  biConnect,
+  ackNotifications,
+  ackAllNotifications,
+} from './queries';
+import { ConnectError, ErrorCode } from './error';
+import {
+@@ -14,6 +17,8 @@ import {
+  Operation,
+  ConnectionType,
+  OperationName,
+  BiConnectionType,
+  NotificationOperation,
+} from './types';
+import { getAddressByProvider, getSigningKeySignature } from './utils';
+import { Env } from '.';
+@@ -297,6 +302,174 @@ class Antdao {
+    }
+  }
+
+  async bidirectionalConnect(
+    targetAddr: string,
+    biConnectionType: BiConnectionType,
+  ) {
+    try {
+      this.address = await this.getAddress();
+      await this.authWithSigningKey();
+      const operation: Operation = {
+        name: biConnectionType,
+        from: this.address,
+        to: targetAddr,
+        namespace: this.namespace,
+        network: this.chain,
+        timestamp: Date.now(),
+      };
+
+      const signature = await signWithSigningKey(
+        JSON.stringify(operation),
+        this.address,
+      );
+      const publicKey = await getPublicKey(this.address);
+
+      const params = {
+        fromAddr: this.address,
+        toAddr: targetAddr,
+        namespace: this.namespace,
+        signature,
+        signingKey: publicKey,
+        operation: JSON.stringify(operation),
+        network: this.chain,
+        instruction: biConnectionType,
+      };
+
+      const resp = await biConnect(params, this.endpoint.AntdaoApi);
+
+      if (resp?.data?.bidirectionalConnect.result === 'INVALID_SIGNATURE') {
+        await clearSigningKey();
+
+        throw new ConnectError(
+          ErrorCode.GraphqlError,
+          resp?.data?.bidirectionalConnect.result,
+        );
+      }
+
+      if (resp?.data?.bidirectionalConnect.result !== 'SUCCESS') {
+        throw new ConnectError(
+          ErrorCode.GraphqlError,
+          resp?.data?.bidirectionalConnect.message,
+        );
+      }
+    } catch (e: any) {
+      throw new ConnectError(ErrorCode.GraphqlError, e.message || e);
+    }
+  }
+
+  async ackNotifications(notificationIds: string[]) {
+    try {
+      this.address = await this.getAddress();
+      await this.authWithSigningKey();
+      const operation: NotificationOperation = {
+        name: 'ack_notifications',
+        from: this.address,
+        namespace: this.namespace,
+        network: this.chain,
+        notificationIds: notificationIds,
+        timestamp: Date.now(),
+      };
+
+      const signature = await signWithSigningKey(
+        JSON.stringify(operation),
+        this.address,
+      );
+      const publicKey = await getPublicKey(this.address);
+
+      const params = {
+        address: this.address,
+        namespace: this.namespace,
+        signature,
+        signingKey: publicKey,
+        operation: JSON.stringify(operation),
+        network: this.chain,
+        notificationIds,
+      };
+
+      console.log('params', params);
+
+      const resp = await ackNotifications(
+        params,
+        this.endpoint.AntdaoApi,
+      );
+
+      if (resp?.data?.ackNotifications.result === 'INVALID_SIGNATURE') {
+        await clearSigningKey();
+
+        throw new ConnectError(
+          ErrorCode.GraphqlError,
+          resp?.data?.ackNotifications.result,
+        );
+      }
+
+      if (resp?.data?.ackNotifications.result !== 'SUCCESS') {
+        throw new ConnectError(
+          ErrorCode.GraphqlError,
+          resp?.data?.ackNotifications.result,
+        );
+      }
+    } catch (e: any) {
+      throw new ConnectError(ErrorCode.GraphqlError, e.message || e);
+    }
+  }
+
+  async ackAllNotifications() {
+    try {
+      this.address = await this.getAddress();
+      await this.authWithSigningKey();
+      const timestamp = Date.now();
+
+      const operation: NotificationOperation = {
+        name: 'ack_all_notifications',
+        from: this.address,
+        namespace: this.namespace,
+        network: this.chain,
+        timestamp,
+      };
+
+      const signature = await signWithSigningKey(
+        JSON.stringify(operation),
+        this.address,
+      );
+      const publicKey = await getPublicKey(this.address);
+
+      const params = {
+        address: this.address,
+        namespace: this.namespace,
+        signature,
+        signingKey: publicKey,
+        operation: JSON.stringify(operation),
+        network: this.chain,
+        timestamp: timestamp.toString(),
+      };
+
+      console.log('params', params);
+
+      const resp = await ackAllNotifications(
+        params,
+        this.endpoint.AntdaoApi,
+      );
+
+      if (resp?.data?.ackAllNotifications.result === 'INVALID_SIGNATURE') {
+        await clearSigningKey();
+
+        throw new ConnectError(
+          ErrorCode.GraphqlError,
+          resp?.data?.ackAllNotifications.result,
+        );
+      }
+
+      if (resp?.data?.ackAllNotifications.result !== 'SUCCESS') {
+        throw new ConnectError(
+          ErrorCode.GraphqlError,
+          resp?.data?.ackAllNotifications.result,
+        );
+      }
+    } catch (e: any) {
+      throw new ConnectError(ErrorCode.GraphqlError, e.message || e);
+    }
+  }
+
+  async getAddress() {
+    if (this.address) {
+      return this.address;
+ 2  
+src/index.ts
+@@ -1,5 +1,5 @@
+import Antdao from './Antdao';
+export { Env, Blockchain, ConnectionType } from './types';
+export { Env, Blockchain, ConnectionType, BiConnectionType } from './types';
+export { ConnectError } from './error';
+export { getAddressByProvider } from './utils';
+
+  109  
+src/queries.ts
+@@ -1,38 +1,14 @@
+import { Blockchain, ConnectionType } from './types';
+import {
+  Blockchain,
+  RegisterSigningKeyInput,
+  UpdateConnectionInput,
+  BatchUpdateConnectionInput,
+  BiConnectInput,
+  AckNotificationsInput,
+  AckAllNotificationsInput,
+} from './types';
+export type Query = 'connect' | 'disconnect';
+
+type RegisterSigningKeyInput = {
+  address: string;
+  message: string;
+  signature: string;
+  network: string;
+};
+
+type UpdateConnectionInput = {
+  fromAddr: string;
+  toAddr: string;
+  namespace: string;
+  signature: string;
+  operation: string;
+  signingKey: string;
+  alias?: string;
+  network: string;
+  type?: ConnectionType;
+};
+
+type BatchUpdateConnectionInput = {
+  fromAddr: string;
+  signingInputs: {
+    toAddr: string;
+    signature: string;
+    operation: string;
+  }[];
+  namespace: string;
+  signingKey: string;
+  network: string;
+  type?: ConnectionType;
+};
+
+export const registerSigningKeySchema = (input: RegisterSigningKeyInput) => {
+  return {
+    operationName: 'registerKey',
+@@ -44,6 +20,7 @@ export const registerSigningKeySchema = (input: RegisterSigningKeyInput) => {
+    variables: { input },
+  };
+};
+
+export const connectQuerySchema = (input: UpdateConnectionInput) => {
+  return {
+    operationName: 'connect',
+@@ -91,6 +68,51 @@ export const setAliasQuerySchema = (input: UpdateConnectionInput) => {
+  };
+};
+
+export const bidirectionalConnectQuerySchema = (input: BiConnectInput) => {
+  return {
+    operationName: 'bidirectionalConnect',
+    query: `mutation bidirectionalConnect($input: BiConnectInput!) {
+      bidirectionalConnect(input: $input) {
+        result
+        message
+      }
+    }`,
+    variables: {
+      input,
+    },
+  };
+};
+
+export const ackNotificationsQuerySchema = (input: AckNotificationsInput) => {
+  return {
+    operationName: 'ackNotifications',
+    query: `mutation ackNotifications($input: AckNotificationsInput!) {
+      ackNotifications(input: $input) {
+        result
+      }
+    }`,
+    variables: {
+      input,
+    },
+  };
+};
+
+export const ackAllNotificationsQuerySchema = (
+  input: AckAllNotificationsInput,
+) => {
+  return {
+    operationName: 'ackAllNotifications',
+    query: `mutation ackAllNotifications($input: AckAllNotificationsInput!) {
+      ackAllNotifications(input: $input) {
+        result
+      }
+    }`,
+    variables: {
+      input,
+    },
+  };
+};
+
+export const authSchema = ({
+  address,
+  signature,
+@@ -116,9 +138,12 @@ export const querySchemas = {
+  connect: connectQuerySchema,
+  batchConnect: batchConnectQuerySchema,
+  disconnect: disconnectQuerySchema,
+  biConnect: bidirectionalConnectQuerySchema,
+  auth: authSchema,
+  setAlias: setAliasQuerySchema,
+  registerSigningKey: registerSigningKeySchema,
+  ackNotifications: ackNotificationsQuerySchema,
+  ackAllNotifications: ackAllNotificationsQuerySchema,
+};
+
+export const request = async (url = '', data = {}) => {
+@@ -202,3 +227,21 @@ export const setAlias = (input: UpdateConnectionInput, url: string) => {
+  const schema = querySchemas['setAlias'](input);
+  return handleQuery(schema, url);
+};
+
+export const biConnect = (input: BiConnectInput, url: string) => {
+  const schema = querySchemas['biConnect'](input);
+  return handleQuery(schema, url);
+};
+
+export const ackNotifications = (input: AckNotificationsInput, url: string) => {
+  const schema = querySchemas['ackNotifications'](input);
+  return handleQuery(schema, url);
+};
+
+export const ackAllNotifications = (
+  input: AckAllNotificationsInput,
+  url: string,
+) => {
+  const schema = querySchemas['ackAllNotifications'](input);
+  return handleQuery(schema, url);
+};
+  98  
+src/types.ts
+@@ -49,7 +49,16 @@ export interface Endpoint {
+  AntdaoApi: string;
+}
+
+export type OperationName = 'follow' | 'like' | 'report' | 'watch' | 'vote';
+export type OperationName =
+  | 'follow'
+  | 'like'
+  | 'report'
+  | 'watch'
+  | 'vote'
+  | 'unfollow'
+  | BiConnectionType
+  | 'ack_notifications'
+  | 'ack_all_notifications';
+
+export enum ConnectionType {
+  FOLLOW = 'FOLLOW',
+@@ -58,8 +67,9 @@ export enum ConnectionType {
+  WATCH = 'WATCH',
+  VOTE = 'VOTE',
+}
+
+export interface Operation {
+  name: OperationName | 'unfollow';
+  name: OperationName;
+  from: string;
+  to: string;
+  namespace: string;
+@@ -68,3 +78,87 @@ export interface Operation {
+  timestamp: number;
+  connectionType?: ConnectionType;
+}
+
+export interface NotificationOperation {
+  name: OperationName;
+  from: string;
+  namespace: string;
+  network: Blockchain;
+  timestamp: number;
+  notificationIds?: string[];
+}
+
+export enum BiConnectionType {
+  INIT = 'INIT',
+  ACCEPT = 'ACCEPT',
+  REJECT = 'REJECT',
+  TERMINATE = 'TERMINATE',
+  BLOCK = 'BLOCK',
+  UNBLOCK = 'UNBLOCK',
+}
+
+// Mutation input types
+
+export interface RegisterSigningKeyInput {
+  address: string;
+  message: string;
+  signature: string;
+  network: string;
+}
+
+export interface UpdateConnectionInput {
+  fromAddr: string;
+  toAddr: string;
+  namespace: string;
+  signature: string;
+  operation: string;
+  signingKey: string;
+  alias?: string;
+  network: string;
+  type?: ConnectionType;
+}
+
+export interface BatchUpdateConnectionInput {
+  fromAddr: string;
+  signingInputs: {
+    toAddr: string;
+    signature: string;
+    operation: string;
+  }[];
+  namespace: string;
+  signingKey: string;
+  network: Blockchain;
+  type?: ConnectionType;
+}
+
+export interface BiConnectInput {
+  fromAddr: string;
+  toAddr: string;
+  namespace: string;
+  signature: string;
+  operation: string;
+  signingKey: string;
+  network: string;
+  type?: ConnectionType;
+  instruction: BiConnectionType;
+}
+
+export interface AckNotificationsInput {
+  address: string;
+  namespace: string;
+  signature: string;
+  operation: string;
+  signingKey: string;
+  network: string;
+  notificationIds: string[];
+}
+
+export interface AckAllNotificationsInput {
+  address: string;
+  namespace: string;
+  signature: string;
+  operation: string;
+  signingKey: string;
+  network: string;
+  timestamp: string;
+}
